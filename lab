@@ -1,0 +1,96 @@
+import nltk
+import math
+import string
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+from nltk.stem import PorterStemmer
+from nltk.corpus import stopwords
+from nltk.tokenize import word_tokenize
+from sklearn.metrics import precision_recall_curve
+from sklearn.metrics.pairwise import cosine_similarity
+from collections import defaultdict, Counter
+ 
+nltk.download('punkt_tab')
+nltk.download('stopwords')
+
+
+df = pd.read_csv("action.csv") 
+
+def preprocess_text(text): 
+    if pd.isna(text):
+        return []
+    tokens = word_tokenize(text.lower())
+    tokens = [word for word in tokens if word not in stopwords.words('english')] 
+    tokens = [word for word in tokens if word not in string.punctuation] 
+    stemmer = PorterStemmer()
+    tokens = [stemmer.stem(word) for word in tokens] 
+    return tokens
+
+inverted_index = defaultdict(set)
+tf_values = defaultdict(lambda: defaultdict(float))
+
+for index, row in df.iterrows():
+    movie_id = row["movie_id"]
+    genre_tokens = preprocess_text(row["genre"])
+    tokens = genre_tokens
+
+    term_freq = Counter(tokens)
+    total_terms = len(tokens)
+
+    for token, freq in term_freq.items():
+        tf_values[movie_id][token] = freq / total_terms
+        inverted_index[token].add(movie_id)
+
+
+
+def compute_idf(inverted_index, total_docs):
+    return {term: math.log(total_docs / (1 + len(doc_list))) for term, doc_list in inverted_index.items()}
+
+
+total_docs = len(df)
+idf_values = compute_idf(inverted_index, total_docs)
+
+
+tfidf_vectors = defaultdict(lambda: defaultdict(float))
+
+for movie_id, tf_terms in tf_values.items():
+    for term, tf in tf_terms.items():
+        tfidf_vectors[movie_id][term] = tf * idf_values.get(term, 0)
+
+
+
+def vectorize(tfidf_dict, vocab):
+    return np.array([tfidf_dict.get(term, 0) for term in vocab])
+
+
+
+query = "Find action and comedy movies with rating between 8 and 10"
+query_tokens = preprocess_text(query)
+
+
+
+query_tf = Counter(query_tokens)
+query_tfidf = {term: (query_tf[term] / len(query_tokens)) * idf_values.get(term, 0) for term in query_tokens}
+
+
+
+filtered_movies = df[(df["rating"] >= 8.0) & (df["rating"] <= 10.0)]
+filtered_movie_ids = set(filtered_movies["movie_id"].values)
+
+
+movie_scores = {}
+
+vocab = list(idf_values.keys()) 
+
+query_vector = vectorize(query_tfidf, vocab)
+
+movie_vectors = np.array([vectorize(tfidf_vectors[movie_id], vocab) for movie_id in filtered_movie_ids])
+query_vector = vectorize(query_tfidf, vocab).reshape(1, -1)
+
+
+cosine_similarities = cosine_similarity(query_vector, movie_vectors)[0]
+
+movie_scores = {movie_id: cosine_sim for movie_id, cosine_sim in zip(filtered_movie_ids, cosine_similarities)}
+
+ranked_movies = sorted(movie_scores.items(), key=lambda x: x[1], reverse=True)
