@@ -1,96 +1,139 @@
+import pandas as pd
 import nltk
 import math
 import string
 import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
-from nltk.stem import PorterStemmer
-from nltk.corpus import stopwords
-from nltk.tokenize import word_tokenize
-from sklearn.metrics import precision_recall_curve
-from sklearn.metrics.pairwise import cosine_similarity
 from collections import defaultdict, Counter
- 
-nltk.download('punkt_tab')
+from nltk.tokenize import word_tokenize
+from nltk.corpus import stopwords
+from nltk.stem import PorterStemmer
+from sklearn.metrics.pairwise import cosine_similarity
+# Precision-Recall Evaluation
+from sklearn.metrics import precision_recall_curve
+# Download necessary NLTK resources
+nltk.download('punkt')
 nltk.download('stopwords')
 
+# Load the movie dataset from CSV
+df = pd.read_csv("action.csv")  # Replace with your actual CSV filename
 
-df = pd.read_csv("action.csv") 
-
-def preprocess_text(text): 
-    if pd.isna(text):
+# Preprocessing Function
+def preprocess_text(text):
+    if pd.isna(text):  # Handle NaN values
         return []
-    tokens = word_tokenize(text.lower())
-    tokens = [word for word in tokens if word not in stopwords.words('english')] 
-    tokens = [word for word in tokens if word not in string.punctuation] 
+    tokens = word_tokenize(text.lower())  # Convert to lowercase & tokenize
+    tokens = [word for word in tokens if word not in stopwords.words('english')]  # Remove stopwords
+    tokens = [word for word in tokens if word not in string.punctuation]  # Remove punctuation
     stemmer = PorterStemmer()
-    tokens = [stemmer.stem(word) for word in tokens] 
+    tokens = [stemmer.stem(word) for word in tokens]  # Stemming
     return tokens
 
+# Build the Inverted Index and Compute TF
 inverted_index = defaultdict(set)
 tf_values = defaultdict(lambda: defaultdict(float))
 
 for index, row in df.iterrows():
     movie_id = row["movie_id"]
-    genre_tokens = preprocess_text(row["genre"])
-    tokens = genre_tokens
+    genre_tokens = preprocess_text(row["genre"])  # Process genre column
+    tokens = genre_tokens  # You can also add description tokens
 
     term_freq = Counter(tokens)
     total_terms = len(tokens)
 
     for token, freq in term_freq.items():
-        tf_values[movie_id][token] = freq / total_terms
-        inverted_index[token].add(movie_id)
+        tf_values[movie_id][token] = freq / total_terms  # Compute TF
+        inverted_index[token].add(movie_id)  # Store movie_id in the index
 
-
-
+# Compute Inverse Document Frequency (IDF)
 def compute_idf(inverted_index, total_docs):
     return {term: math.log(total_docs / (1 + len(doc_list))) for term, doc_list in inverted_index.items()}
 
-
+# Apply TF-IDF
 total_docs = len(df)
 idf_values = compute_idf(inverted_index, total_docs)
 
-
+# Compute TF-IDF vectors for each movie
 tfidf_vectors = defaultdict(lambda: defaultdict(float))
 
 for movie_id, tf_terms in tf_values.items():
     for term, tf in tf_terms.items():
-        tfidf_vectors[movie_id][term] = tf * idf_values.get(term, 0)
+        tfidf_vectors[movie_id][term] = tf * idf_values.get(term, 0)  # TF-IDF formula
 
-
-
+# Convert TF-IDF dictionary to vectors (for cosine similarity)
 def vectorize(tfidf_dict, vocab):
     return np.array([tfidf_dict.get(term, 0) for term in vocab])
 
-
-
+# Retrieve Movies Matching Query using Cosine Similarity
 query = "Find action and comedy movies with rating between 8 and 10"
 query_tokens = preprocess_text(query)
 
-
-
+# Compute TF-IDF for query
 query_tf = Counter(query_tokens)
 query_tfidf = {term: (query_tf[term] / len(query_tokens)) * idf_values.get(term, 0) for term in query_tokens}
 
-
-
+# Define movie filtering condition
 filtered_movies = df[(df["rating"] >= 8.0) & (df["rating"] <= 10.0)]
 filtered_movie_ids = set(filtered_movies["movie_id"].values)
 
-
+# Compute Cosine Similarity
 movie_scores = {}
 
-vocab = list(idf_values.keys()) 
+vocab = list(idf_values.keys())  # Global vocabulary
 
 query_vector = vectorize(query_tfidf, vocab)
 
 movie_vectors = np.array([vectorize(tfidf_vectors[movie_id], vocab) for movie_id in filtered_movie_ids])
-query_vector = vectorize(query_tfidf, vocab).reshape(1, -1)
+query_vector = vectorize(query_tfidf, vocab).reshape(1, -1)  # Reshape for sklearn
 
-
+# Compute cosine similarity in one go
 cosine_similarities = cosine_similarity(query_vector, movie_vectors)[0]
 
+# Store movie scores
 movie_scores = {movie_id: cosine_sim for movie_id, cosine_sim in zip(filtered_movie_ids, cosine_similarities)}
 
+# Sort results by cosine similarity
 ranked_movies = sorted(movie_scores.items(), key=lambda x: x[1], reverse=True)
+
+# Print top matching movies
+print("Top Matching Movies:")
+for movie_id, score in ranked_movies[:5]:
+    movie_row = df[df["movie_id"] == movie_id].iloc[0]
+    print(f"{movie_row['movie_name']} ({movie_row['year']}), Rating: {movie_row['rating']}, Score: {score:.4f}")
+
+
+def evaluate_results(retrieved_movies, relevant_movies):
+    """
+    Compute precision-recall values using sklearn's precision_recall_curve function.
+    """
+    relevant_set = set(relevant_movies)
+    
+    # Create binary relevance labels (1 if relevant, 0 if not)
+    y_true = [1 if movie in relevant_set else 0 for movie in retrieved_movies]
+    
+    # Assume a score of 1 for retrieved movies (since ranking isn't used here)
+    y_scores = [1] * len(retrieved_movies)
+
+    # Compute precision, recall, and thresholds
+    precision_vals, recall_vals, _ = precision_recall_curve(y_true, y_scores)
+
+    return precision_vals, recall_vals
+
+
+# Compute Precision & Recall
+relevant_movies = filtered_movies["movie_id"].values.tolist()
+retrieved_movies = [movie_id for movie_id, _ in ranked_movies[:10]]
+precision_vals, recall_vals = evaluate_results(retrieved_movies, relevant_movies)
+
+# Plot Interpolated Precision-Recall Curve
+def plot_precision_recall_curve(precision_vals, recall_vals):
+    plt.plot(recall_vals, precision_vals, marker="o", linestyle="-", label="P-R Curve")
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title("Interpolated Precision-Recall Curve")
+    plt.legend()
+    plt.grid()
+    plt.show()
+
+# Plot the curve
+plot_precision_recall_curve(precision_vals, recall_vals)
